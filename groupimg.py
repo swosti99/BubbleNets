@@ -9,6 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 from multiprocessing.dummy import Pool as ThreadPool
 from multiprocessing import cpu_count
+import cPickle as pickle
 
 Image.MAX_IMAGE_PIXELS = None
 warnings.simplefilter('ignore')
@@ -17,12 +18,12 @@ class K_means:
 
   def __init__(self, k=3, size=False, resample=32):
     self.k = k
-    self.centroid_data = []
-    self.centroid_frames = []
-    self.centroid_to_img = []
-    self.cluster = []
-    self.data = []
-    self.end = []
+    self.cluster = [] # the index of cluster each image belongs to.
+    self.cluster_ACTcentroid = [] # each cluster's actual centroid
+    self.cluster_IMGcentroid = {} # each cluster's img index closest to actual centroid
+    self.cluster_data = {} # image indices that belongs to each cluster. Key is cluster index. Values are image indices.
+    self.data = [] # features of each image
+    self.end = [] # filenmaes of each image
     self.i = 0
     self.size = size
     self.resample = resample
@@ -39,7 +40,6 @@ class K_means:
       s += math.sqrt((float(x1[i]) - float(x2[i])) ** 2)
     return s
 
-  # read images and assign them a value 0 to (k-1) to indicate the cluster they belong to
   def read_image(self,im):
     if self.i >= self.k :
       self.i = 0
@@ -94,30 +94,28 @@ class K_means:
       for x in range(len(self.cluster)):
         dist = []
         for a in range(self.k):
-          dist.append( self.manhattan_distance(self.data[x],m[a]) )
-        _mindist = dist.index(min(dist)) # index of closest cluster
-        # we stop after there is no re-assigning of images
+            dist.append( self.manhattan_distance(self.data[x],m[a]) )
+        _mindist = dist.index(min(dist))
         if self.cluster[x] != _mindist :
           self.cluster[x] = _mindist
           isover = False
-    self.centroid_data = m
+    self.cluster_ACTcentroid = m
 
-  def get_centroid_frames(self):
-    self.fill_centroid_to_img()
-    for i in range(self.k):
-      self.centroid_frames.append([])
-    for c in range(self.k):
-      dist = []
-      for img in self.centroid_to_img[c]:
-        dist.append( self.manhattan_distance(self.data[img],self.centroid_data[c]))
-      self.centroid_frames[c] = dist.index(min(dist))
-    return self.centroid_frames
-
-  def fill_centroid_to_img(self):
-    for i in range(self.k):
-      self.centroid_to_img.append([])
+  def export_clusters(self):
+    for k in range(self.k): #initialization
+        self.cluster_data[k] = []
+        self.cluster_IMGcentroid[k] = []
     for i in range(len(self.cluster)):
-      self.centroid_to_img[self.cluster[i]].append(i)
+        self.cluster_data[self.cluster[i]].append(i)
+    for key, values in self.cluster_data.items():
+        act_centroid = self.cluster_ACTcentroid[key]
+        min_dist = -1
+        for img_idx in values:
+            dist = self.manhattan_distance(self.data[img_idx], act_centroid)
+            if min_dist < 0 or dist <= min_dist:
+                min_dist = dist
+                self.cluster_IMGcentroid[key] = img_idx
+
 
 ap = argparse.ArgumentParser()
 ap.add_argument("-f", "--folder", required=True, help="path to image folder")
@@ -128,37 +126,53 @@ ap.add_argument("-m", "--move", default=False, action="store_true", help="move i
 args = vars(ap.parse_args())
 types = ('*.jpg', '*.JPG', '*.png', '*.jpeg')
 imagePaths = []
-folder = args["folder"]
-if not folder.endswith("/") :
-	folder+="/"
-for files in types :
-	imagePaths.extend(sorted(glob.glob(folder+files)))
-nimages = len(imagePaths)
+video_folders = args["folder"]
+videoList = sorted(next(os.walk(video_folders))[1])
+for i, videoName in enumerate(videoList):
+    folder = os.path.join(video_folders, videoName, 'src')
+    print(folder)
+    if not folder.endswith("/") :
+    	folder+="/"
+    for files in types :
+    	imagePaths.extend(sorted(glob.glob(folder+files)))
+    nimages = len(imagePaths)
+    nfolders = int(math.log(args["kmeans"], 10))+1
+    if nimages <= 0 :
+    	print("No images found!")
+    	exit()
+    if args["resample"] < 16 or args["resample"] > 256 :
+    	print("-r should be a value between 16 and 256")
+    	exit()
+    pbar = tqdm(total=nimages)
+    k = K_means(args["kmeans"],args["size"],args["resample"])
+    k.generate_k_clusters(imagePaths)
+    k.rearrange_clusters()
+    k.export_clusters()
 
-nfolders = int(math.log(args["kmeans"], 10))+1
+    #export files
+    mainDir = os.getcwd()
+    rawDataDir = os.path.join(mainDir, 'data', 'rawData')
+    outputDir = os.path.join(rawData, videoName)
+    clust_data_file = os.path.join(outputDir, 'cluster_data.pk')
+    clust_centroid_file = os.path.join(outputDir, 'cluster_centroid.pk')
+    pickle.dump(k.cluster_data, open(clust_data_file, 'wb')) # output the whole clustering result
+    pickle.dump(k.cluster_IMGcentroid, open(clust_centroid_file, 'wb')) #output img indices as clusters' centroids
 
-if nimages <= 0 :
-	print("No images found!")
-	exit()
-if args["resample"] < 16 or args["resample"] > 256 :
-	print("-r should be a value between 16 and 256")
-	exit()
-pbar = tqdm(total=nimages)
-k = K_means(args["kmeans"],args["size"],args["resample"])
-k.generate_k_clusters(imagePaths)
-# k.rearrange_clusters()
-k.rearrange_clusters()
-print(k.get_centroid_frames())
-# print(centroids)
-# print('\n')
+    clust_data = pickle.load(open(clust_data_file, 'rb'))
+    clust_centroid = pickle.load(open(clust_centroid_file, 'rb'))
+    print(clust_data)
+    print(clust_centroid)
 
-# for i in range(k.k) :
-# 	try :
-# 	  os.makedirs(folder+str(i+1).zfill(nfolders))
-# 	except :
-# 	  print("Folder already exists")
-# action = shutil.copy
-# if args["move"] :
-# 	action = shutil.move
-# for i in range(len(k.cluster)):
-# 	action(k.end[i], folder+"/"+str(k.cluster[i]+1).zfill(nfolders)+"/")
+#NOTE: modify
+"""
+for i in range(k.k) :
+	try :
+	  os.makedirs(folder+str(i+1).zfill(nfolders))
+	except :
+	  print("Folder already exists")
+action = shutil.copy
+if args["move"] :
+	action = shutil.move
+for i in range(len(k.cluster)):
+	action(k.end[i], folder+"/"+str(k.cluster[i]+1).zfill(nfolders)+"/")
+"""
